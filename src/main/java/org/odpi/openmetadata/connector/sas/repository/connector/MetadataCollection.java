@@ -7,20 +7,26 @@ package org.odpi.openmetadata.connector.sas.repository.connector;
 
 import org.odpi.openmetadata.connector.sas.auditlog.ErrorCode;
 import org.odpi.openmetadata.connector.sas.event.mapper.RepositoryEventMapper;
+import org.odpi.openmetadata.connector.sas.event.model.catalog.instance.Instance;
 import org.odpi.openmetadata.connector.sas.repository.connector.mapping.EntityMappingSASCatalog2OMRS;
 import org.odpi.openmetadata.connector.sas.repository.connector.mapping.RelationshipMapping;
 import org.odpi.openmetadata.connector.sas.repository.connector.mapping.SASCatalogObject;
+import org.odpi.openmetadata.connector.sas.repository.connector.mapping.SequencingUtils;
 import org.odpi.openmetadata.connector.sas.repository.connector.model.SASCatalogGuid;
 import org.odpi.openmetadata.connector.sas.repository.connector.stores.AttributeTypeDefStore;
 import org.odpi.openmetadata.connector.sas.repository.connector.stores.TypeDefStore;
 import org.odpi.openmetadata.repositoryservices.connectors.stores.metadatacollectionstore.OMRSMetadataCollectionBase;
+import org.odpi.openmetadata.repositoryservices.connectors.stores.metadatacollectionstore.properties.MatchCriteria;
 import org.odpi.openmetadata.repositoryservices.connectors.stores.metadatacollectionstore.properties.SequencingOrder;
 import org.odpi.openmetadata.repositoryservices.connectors.stores.metadatacollectionstore.properties.instances.EntityDetail;
 import org.odpi.openmetadata.repositoryservices.connectors.stores.metadatacollectionstore.properties.instances.EntitySummary;
+import org.odpi.openmetadata.repositoryservices.connectors.stores.metadatacollectionstore.properties.instances.InstanceProperties;
+import org.odpi.openmetadata.repositoryservices.connectors.stores.metadatacollectionstore.properties.instances.InstancePropertyValue;
 import org.odpi.openmetadata.repositoryservices.connectors.stores.metadatacollectionstore.properties.instances.InstanceStatus;
 import org.odpi.openmetadata.repositoryservices.connectors.stores.metadatacollectionstore.properties.instances.Relationship;
 import org.odpi.openmetadata.repositoryservices.connectors.stores.metadatacollectionstore.properties.typedefs.AttributeTypeDef;
 import org.odpi.openmetadata.repositoryservices.connectors.stores.metadatacollectionstore.properties.typedefs.TypeDef;
+import org.odpi.openmetadata.repositoryservices.connectors.stores.metadatacollectionstore.properties.typedefs.TypeDefAttribute;
 import org.odpi.openmetadata.repositoryservices.connectors.stores.metadatacollectionstore.properties.typedefs.TypeDefCategory;
 import org.odpi.openmetadata.repositoryservices.connectors.stores.metadatacollectionstore.properties.typedefs.TypeDefGallery;
 import org.odpi.openmetadata.repositoryservices.connectors.stores.metadatacollectionstore.repositoryconnector.OMRSRepositoryHelper;
@@ -30,6 +36,7 @@ import org.odpi.openmetadata.repositoryservices.ffdc.exception.FunctionNotSuppor
 import org.odpi.openmetadata.repositoryservices.ffdc.exception.InvalidParameterException;
 import org.odpi.openmetadata.repositoryservices.ffdc.exception.InvalidTypeDefException;
 import org.odpi.openmetadata.repositoryservices.ffdc.exception.PagingErrorException;
+import org.odpi.openmetadata.repositoryservices.ffdc.exception.PropertyErrorException;
 import org.odpi.openmetadata.repositoryservices.ffdc.exception.RelationshipNotKnownException;
 import org.odpi.openmetadata.repositoryservices.ffdc.exception.RepositoryErrorException;
 import org.odpi.openmetadata.repositoryservices.ffdc.exception.TypeDefConflictException;
@@ -40,8 +47,12 @@ import org.odpi.openmetadata.repositoryservices.ffdc.exception.UserNotAuthorized
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 public class MetadataCollection extends OMRSMetadataCollectionBase {
 
@@ -449,6 +460,456 @@ public class MetadataCollection extends OMRSMetadataCollectionBase {
 
     }
 
+    @Override
+    public  List<EntityDetail> findEntitiesByProperty(String                    userId,
+                                                      String                    entityTypeGUID,
+                                                      InstanceProperties matchProperties,
+                                                      MatchCriteria matchCriteria,
+                                                      int                       fromEntityElement,
+                                                      List<InstanceStatus>      limitResultsByStatus,
+                                                      List<String>              limitResultsByClassification,
+                                                      Date                      asOfTime,
+                                                      String                    sequencingProperty,
+                                                      SequencingOrder           sequencingOrder,
+                                                      int                       pageSize) throws InvalidParameterException,
+            TypeErrorException,
+            RepositoryErrorException,
+            PropertyErrorException,
+            PagingErrorException,
+            FunctionNotSupportedException,
+            UserNotAuthorizedException {
+
+        final String methodName = "findEntitiesByProperty";
+        findEntitiesByPropertyParameterValidation(
+                userId,
+                entityTypeGUID,
+                matchProperties,
+                matchCriteria,
+                fromEntityElement,
+                limitResultsByStatus,
+                limitResultsByClassification,
+                asOfTime,
+                sequencingProperty,
+                sequencingOrder,
+                pageSize
+        );
+
+        List<Instance> results = null;
+
+        // Immediately throw unimplemented exception if trying to retrieve historical view
+        if (asOfTime != null) {
+            raiseFunctionNotSupportedException(ErrorCode.NO_HISTORY, methodName, repositoryName);
+        }
+
+        results = buildAndRunDSLSearch(
+                methodName,
+                entityTypeGUID,
+                limitResultsByClassification,
+                matchProperties,
+                matchCriteria,
+                fromEntityElement,
+                limitResultsByStatus,
+                sequencingProperty,
+                sequencingOrder,
+                pageSize,
+                userId
+        );
+
+        List<EntityDetail> entityDetails = null;
+        if (results != null) {
+            entityDetails = sortAndLimitFinalResults(
+                    results,
+                    entityTypeGUID,
+                    fromEntityElement,
+                    sequencingProperty,
+                    sequencingOrder,
+                    pageSize,
+                    userId
+            );
+        }
+        return (entityDetails == null || entityDetails.isEmpty()) ? null : entityDetails;
+
+    }
+
+    /**
+     * Build an Atlas domain-specific language (DSL) query based on the provided parameters, and return its results.
+     *
+     * @param methodName the name of the calling method
+     * @param entityTypeGUID unique identifier for the type of entity requested.  Null means any type of entity
+     *                       (but could be slow so not recommended.
+     * @param limitResultsByClassification list of classifications by which to limit the results.
+     * @param matchProperties Optional list of entity properties to match (contains wildcards).
+     * @param matchCriteria Enum defining how the match properties should be matched to the classifications in the repository.
+     * @param fromEntityElement the starting element number of the entities to return.
+     *                                This is used when retrieving elements
+     *                                beyond the first page of results. Zero means start from the first element.
+     * @param limitResultsByStatus By default, entities in all statuses are returned.  However, it is possible
+     *                             to specify a list of statuses (eg ACTIVE) to restrict the results to.  Null means all
+     *                             status values.
+     * @param sequencingProperty String name of the entity property that is to be used to sequence the results.
+     *                           Null means do not sequence on a property name (see SequencingOrder).
+     * @param sequencingOrder Enum defining how the results should be ordered.
+     * @param pageSize the maximum number of result entities that can be returned on this request.  Zero means
+     *                 unrestricted return results size.
+     * @param userId the user through which to run the search
+     * @return {@code List<AtlasEntityHeader>}
+     * @throws FunctionNotSupportedException when trying to search using a status that is not supported in Atlas
+     * @throws RepositoryErrorException when there is some error running the search against Atlas
+     */
+    private List<Instance> buildAndRunDSLSearch(String methodName,
+                                                          String entityTypeGUID,
+                                                          List<String> limitResultsByClassification,
+                                                          InstanceProperties matchProperties,
+                                                          MatchCriteria matchCriteria,
+                                                          int fromEntityElement,
+                                                          List<InstanceStatus> limitResultsByStatus,
+                                                          String sequencingProperty,
+                                                          SequencingOrder sequencingOrder,
+                                                          int pageSize,
+                                                          String userId) throws
+            FunctionNotSupportedException,
+            RepositoryErrorException {
+
+        List<Instance> results = null;
+        Map<String, String> queryParams = new HashMap<>();
+        Map<String, String> attributeFilter = new HashMap<>();
+
+        String filter = "";
+        String catalogTypeName = "";
+
+        String propertyMatchDelim = "and";
+        if (matchCriteria != null && matchCriteria.equals(MatchCriteria.ANY)) {
+            propertyMatchDelim = "or";
+        }
+
+        // Run multiple searches, if there are multiple types mapped to the OMRS type...
+        Map<String, Map<String, String>> mappingsToSearch = getMappingsToSearch(entityTypeGUID, userId);
+        for (Map.Entry<String, Map<String, String>> entryToSearch : mappingsToSearch.entrySet()) {
+            String omrsTypeName = entryToSearch.getKey();
+            Map<String, String> catalogTypeNamesByPrefix = entryToSearch.getValue();
+
+            for (Map.Entry<String, String> entry : catalogTypeNamesByPrefix.entrySet()) {
+
+                String prefix = entry.getKey();
+                catalogTypeName = entry.getValue();
+                Map<String, String> omrsPropertyMap = typeDefStore.getPropertyMappingsForOMRSTypeDef(omrsTypeName, prefix);
+
+//                sb.append("from ");
+//                sb.append(catalogTypeName);
+//                boolean bWhereClauseAdded = false;
+
+                // Add the multiple classification criteria, if requested
+                // (recall that OMRS classification name should be identical to Atlas classification name -- no translation needed)
+                //TODO: Classification support
+//                if (limitResultsByClassification != null) {
+//                    List<String> classifications = new ArrayList<>();
+//                    for (String classificationName : limitResultsByClassification) {
+//                        classifications.add(atlasTypeName + " isa " + classificationName);
+//                    }
+//                    if (!classifications.isEmpty()) {
+//                        sb.append(" where ");
+//                        sb.append(String.join(" and ", classifications));
+//                        bWhereClauseAdded = true;
+//                    }
+//                }
+
+                // Add match properties, if requested
+                if (matchProperties != null) {
+//                    List<String> propertyCriteria = new ArrayList<>();
+
+                    Map<String, InstancePropertyValue> properties = matchProperties.getInstanceProperties();
+                    // By default, include only Referenceable's properties (as these will be the only properties that exist
+                    // across ALL entity types)
+                    Map<String, TypeDefAttribute> omrsAttrTypeDefs = typeDefStore.getAllTypeDefAttributesForName(omrsTypeName);
+                    if (properties != null) {
+                        for (Map.Entry<String, InstancePropertyValue> property : properties.entrySet()) {
+                            String omrsPropertyName = property.getKey();
+                            String catalogName = omrsPropertyMap.get(omrsPropertyName);
+                            String catalogPropertyName = catalogName.substring(catalogName.indexOf(".") + 1);
+                            InstancePropertyValue value = property.getValue();
+
+                            if(catalogName.startsWith("attribute.")) {
+                                attributeFilter.put(catalogPropertyName, value.valueAsString());
+                            } else {
+                                if (filter.isEmpty()) {
+                                    filter = String.format("eq(%s,\"%s\")", catalogPropertyName, value.valueAsString());
+                                } else {
+                                    filter = String.format("%s(%s,eq(%s,\"%s\"))", propertyMatchDelim, filter, catalogPropertyName, value.valueAsString());
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (filter.isEmpty()) {
+                    filter = String.format("eq(type,\"%s\")", catalogTypeName);
+                } else {
+                    filter = String.format("and(eq(type, \"%s\"),%s)", catalogTypeName, filter);
+                }
+
+                queryParams.put("filter", filter);
+
+//                // Add status limiters, if requested
+//                boolean unsupportedStatusRequested = false;
+//                if (limitResultsByStatus != null) {
+//                    List<String> states = new ArrayList<>();
+//                    Set<InstanceStatus> limitSet = new HashSet<>(limitResultsByStatus);
+//                    for (InstanceStatus requestedStatus : limitSet) {
+//                        switch (requestedStatus) {
+//                            case ACTIVE:
+//                                states.add("__state = 'ACTIVE'");
+//                                break;
+//                            case DELETED:
+//                                states.add("__state = 'DELETED'");
+//                                break;
+//                            default:
+//                                unsupportedStatusRequested = true;
+//                                break;
+//                        }
+//                    }
+//                    if (!states.isEmpty()) {
+//                        if (!bWhereClauseAdded) {
+//                            sb.append(" where");
+//                        }
+//                        sb.append(" ");
+//                        sb.append(String.join(" or ", states));
+//                    } else if (unsupportedStatusRequested) {
+//                        // We are searching only for a state that Atlas does not support, so we should ensure no
+//                        // results are returned (in fact, skip searching entirely).
+//                        skipSearch = true;
+//                    }
+            }
+
+//                // Add sorting criteria, if requested
+//                if (sequencingOrder != null) {
+//                    switch (sequencingOrder) {
+//                        case GUID:
+//                            sb.append(" orderby __guid asc");
+//                            break;
+//                        case LAST_UPDATE_OLDEST:
+//                            sb.append(" orderby __modificationTimestamp asc");
+//                            break;
+//                        case LAST_UPDATE_RECENT:
+//                            sb.append(" orderby __modificationTimestamp desc");
+//                            break;
+//                        case CREATION_DATE_OLDEST:
+//                            sb.append(" orderby __timestamp asc");
+//                            break;
+//                        case CREATION_DATE_RECENT:
+//                            sb.append(" orderby __timestamp desc");
+//                            break;
+//                        case PROPERTY_ASCENDING:
+//                            if (sequencingProperty != null) {
+//                                String atlasPropertyName = omrsPropertyMap.get(sequencingProperty);
+//                                if (atlasPropertyName != null) {
+//                                    sb.append(" orderby ");
+//                                    sb.append(atlasPropertyName);
+//                                    sb.append(" asc");
+//                                } else {
+//                                    log.warn("Unable to find mapped Atlas property for sorting for: {}", sequencingProperty);
+//                                    sb.append(" orderby __guid asc");
+//                                }
+//                            } else {
+//                                log.warn("No property for sorting provided, defaulting to GUID.");
+//                                sb.append(" orderby __guid asc");
+//                            }
+//                            break;
+//                        case PROPERTY_DESCENDING:
+//                            if (sequencingProperty != null) {
+//                                String atlasPropertyName = omrsPropertyMap.get(sequencingProperty);
+//                                if (atlasPropertyName != null) {
+//                                    sb.append(" orderby ");
+//                                    sb.append(atlasPropertyName);
+//                                    sb.append(" desc");
+//                                } else {
+//                                    log.warn("Unable to find mapped Atlas property for sorting for: {}", sequencingProperty);
+//                                    sb.append(" orderby __guid asc");
+//                                }
+//                            } else {
+//                                log.warn("No property for sorting provided, defaulting to GUID.");
+//                                sb.append(" orderby __guid desc");
+//                            }
+//                            break;
+//                        default:
+//                            // Do nothing -- no sorting
+//                            break;
+//                    }
+
+            // Add paging criteria, if requested
+            if (pageSize > 0) {
+                queryParams.put("limit", pageSize+"");
+            }
+            if (fromEntityElement > 0) {
+                queryParams.put("offset", fromEntityElement+"");
+            }
+
+            try {
+                results = repositoryConnector.getInstancesWithParams(queryParams, attributeFilter);
+            } catch (Exception e) {
+                raiseRepositoryErrorException(ErrorCode.INVALID_SEARCH, methodName, e, filter);
+            }
+        }
+        return results;
+    }
+
+    /**
+     * Retrieve the listing of implemented mappings that should be used for an entity search, including navigating
+     * subtypes when a supertype is the entity type provided.  The result will be a map of OMRS type name to a map
+     * keyed by prefix (which could be null) to the mapped atlas type names.
+     *
+     * @param entityTypeGUID the GUID of the OMRS entity type for which to search
+     * @param userId the userId through which to search
+     * @return {@code Map<String, Map<String, String>>}
+     * @throws RepositoryErrorException on any unexpected error
+     */
+    private Map<String, Map<String, String>> getMappingsToSearch(String entityTypeGUID, String userId) throws
+            RepositoryErrorException {
+
+        Map<String, Map<String, String>> results = new HashMap<>();
+        Map<String, String> atlasTypeNamesByPrefix = new HashMap<>();
+        String requestedTypeName = null;
+        if (entityTypeGUID != null) {
+            TypeDef typeDef = typeDefStore.getTypeDefByGUID(entityTypeGUID, false);
+            if (typeDef != null) {
+                String omrsTypeName = typeDef.getName();
+                atlasTypeNamesByPrefix = typeDefStore.getAllMappedCatalogTypeDefNames(omrsTypeName);
+                results.put(omrsTypeName, atlasTypeNamesByPrefix);
+            } else {
+                TypeDef unimplemented = typeDefStore.getUnimplementedTypeDefByGUID(entityTypeGUID);
+                requestedTypeName = unimplemented.getName();
+                log.warn("Unable to search for type, unknown to repository: {}", entityTypeGUID);
+            }
+        } else {
+            atlasTypeNamesByPrefix.put(null, "Referenceable");
+            results.put("Referenceable", atlasTypeNamesByPrefix);
+        }
+
+        // If the requested type is one that is not directly mapped, we need to scan whether we have implemented
+        // any of its sub-types to include in the results
+        if (requestedTypeName != null) {
+            try {
+                List<TypeDef> allEntityTypes = new ArrayList<>();//findTypeDefsByCategory(userId, TypeDefCategory.ENTITY_DEF);
+                for (TypeDef typeDef : allEntityTypes) {
+                    String typeDefName = typeDef.getName();
+                    if (!typeDefName.equals("Referenceable") && repositoryHelper.isTypeOf(metadataCollectionId, typeDefName, requestedTypeName)) {
+                        Map<String, String> mappings = typeDefStore.getAllMappedCatalogTypeDefNames(typeDefName);
+                        if (!mappings.isEmpty()) {
+                            results.put(typeDefName, mappings);
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                log.error("An invalid parameter was provided to findTypeDefsByCategory, cannot determine types to include in search.", e);
+            }
+        }
+
+        return results;
+
+    }
+
+
+    /**
+     * Sort the list of results and limit based on the provided parameters.
+     *
+     * @param results the Apache Atlas results to sort and limit
+     * @param entityTypeGUID the type of entity that was requested (or null for all)
+     * @param fromElement the starting element to include in the limited results
+     * @param sequencingProperty the property by which to sort the results (or null, if not sorting by property)
+     * @param sequencingOrder the order by which to sort the results
+     * @param pageSize the number of results to include in this page
+     * @param userId the user through which to translate the results
+     * @return
+     * @throws InvalidParameterException the guid is null.
+     * @throws RepositoryErrorException there is a problem communicating with the metadata repository where
+     *                                  the metadata collection is stored.
+     * @throws UserNotAuthorizedException the userId is not permitted to perform this operation.
+     */
+    private List<EntityDetail> sortAndLimitFinalResults(List<Instance> results,
+                                                        String entityTypeGUID,
+                                                        int fromElement,
+                                                        String sequencingProperty,
+                                                        SequencingOrder sequencingOrder,
+                                                        int pageSize,
+                                                        String userId) throws
+            InvalidParameterException,
+            RepositoryErrorException,
+            UserNotAuthorizedException {
+
+        // If no entity type GUID was provided (search was done with 'null' originally for all types), then set it here
+        // to the GUID for Referenceable, so that we can properly do subtype checking in the subsequent steps.
+        if (entityTypeGUID == null) {
+            entityTypeGUID = typeDefStore.getTypeDefByName("Referenceable").getGUID();
+        }
+
+        List<EntityDetail> totalResults = new ArrayList<>(getEntityDetailsFromCatalogInstances(results, entityTypeGUID, userId));
+
+        // TODO: send something in that determines whether re-sorting the results is actually necessary?
+        // Need to potentially re-sort and re-limit the results, if we ran the search against more than one type
+        Comparator<EntityDetail> comparator = SequencingUtils.getEntityDetailComparator(sequencingOrder, sequencingProperty);
+        if (comparator != null) {
+            totalResults.sort(comparator);
+        }
+        int endOfPageMarker = Math.min(fromElement + pageSize, totalResults.size());
+        if (fromElement != 0 || endOfPageMarker < totalResults.size()) {
+            totalResults = totalResults.subList(fromElement, endOfPageMarker);
+        }
+
+        return null;
+
+    }
+
+    /**
+     * Retrieves a list of EntityDetail objects given a list of AtlasEntityHeader objects.
+     *
+     * @param instances the Atlas entities for which to retrieve details
+     * @param entityTypeGUID the type of entity that was requested (or null for all)
+     * @param userId the user through which to do the retrieval
+     * @return {@code List<EntityDetail>}
+     * @throws InvalidParameterException the guid is null.
+     * @throws RepositoryErrorException there is a problem communicating with the metadata repository where
+     *                                  the metadata collection is stored.
+     * @throws UserNotAuthorizedException the userId is not permitted to perform this operation.
+     */
+    private List<EntityDetail> getEntityDetailsFromCatalogInstances(List<Instance> instances,
+                                                                    String entityTypeGUID,
+                                                                    String userId) throws
+            InvalidParameterException,
+            RepositoryErrorException,
+            UserNotAuthorizedException {
+
+        List<EntityDetail> entityDetails = new ArrayList<>();
+
+        if (instances != null) {
+            for (Instance instance : instances) {
+                try {
+                    // TODO: See if we can do this without making another REST request
+                    EntityDetail detail = getEntityDetail(userId, instance.getId());
+                    // Depending on prefix, this could come back with results that should not be included
+                    // (ie. for generated types or non-generated types, depending on requested entityTypeGUID),
+                    // so only include those that were requested
+                    if (detail != null) {
+                        String typeName = detail.getType().getTypeDefName();
+                        try {
+                            TypeDef typeDef = repositoryHelper.getTypeDef(repositoryName, "entityTypeGUID", entityTypeGUID, "getEntityDetailsFromAtlasResults");
+                            if (repositoryHelper.isTypeOf(repositoryName, typeName, typeDef.getName())) {
+                                entityDetails.add(detail);
+                            }
+                        } catch (TypeErrorException e) {
+                            log.error("Unable to find any TypeDef for entityTypeGUID: {}", entityTypeGUID);
+                        }
+                    } else {
+                        log.error("Entity with GUID {} not known -- excluding from results.", instance.getId());
+                    }
+                } catch (EntityNotKnownException e) {
+                    log.error("Entity with GUID {} not known -- excluding from results.", instance.getId());
+                }
+            }
+        }
+
+        return entityDetails;
+
+    }
+
     /**
      * Try to retrieve an Catalog entity using the provided GUID, and if not found throw an EntityNotKnownException.
      * @param guid the GUID for the entity to retrieve
@@ -556,5 +1017,28 @@ public class MetadataCollection extends OMRSMetadataCollectionBase {
                 this.getClass().getName(),
                 methodName);
     }
+
+
+    /**
+     * Throw a RepositoryErrorException using the provided parameters.
+     * @param errorCode the error code for the exception
+     * @param methodName the method throwing the exception
+     * @param cause the underlying cause of the exception (if any, otherwise null)
+     * @param params any parameters for formatting the error message
+     * @throws RepositoryErrorException always
+     */
+    private void raiseRepositoryErrorException(ErrorCode errorCode, String methodName, Throwable cause, String ...params) throws RepositoryErrorException {
+        if (cause == null) {
+            throw new RepositoryErrorException(errorCode.getMessageDefinition(params),
+                    this.getClass().getName(),
+                    methodName);
+        } else {
+            throw new RepositoryErrorException(errorCode.getMessageDefinition(params),
+                    this.getClass().getName(),
+                    methodName,
+                    cause);
+        }
+    }
+
 
 }
